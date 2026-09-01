@@ -1,0 +1,135 @@
+{
+  "name": "cliproxy-inline-completion",
+  "displayName": "CLIProxyApi Inline Completion",
+  "description": "AI inline completions (ghost text) powered by a local CLIProxyApi server.",
+  "version": "0.0.1",
+  "publisher": "ksoze84",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ksoze84/CLIProxyInlineCompletion.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ksoze84/CLIProxyInlineCompletion/issues"
+  },
+  "homepage": "https://github.com/ksoze84/CLIProxyInlineCompletion#readme",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning"
+  ],
+  "keywords": [
+    "inline completion",
+    "ghost text",
+    "cliproxyapi",
+    "ai",
+    "copilot"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cliproxyInline.toggle",
+        "title": "CLIProxy Inline: Toggle Inline Completions"
+      },
+      {
+        "command": "cliproxyInline.triggerCompletion",
+        "title": "CLIProxy Inline: Trigger Inline Completion"
+      },
+      {
+        "command": "cliproxyInline.selectModel",
+        "title": "CLIProxy Inline: Select Model"
+      }
+    ],
+    "configuration": {
+      "title": "CLIProxyApi Inline Completion",
+      "properties": {
+        "cliproxyInline.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline completions from CLIProxyApi."
+        },
+        "cliproxyInline.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8317",
+          "description": "Base URL of the CLIProxyApi server."
+        },
+        "cliproxyInline.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "API key sent as `Authorization: Bearer <key>`. Leave empty if the server does not require authentication."
+        },
+        "cliproxyInline.model": {
+          "type": "string",
+          "default": "gpt-4o-mini",
+          "description": "Model id to request from CLIProxyApi."
+        },
+        "cliproxyInline.maxTokens": {
+          "type": "number",
+          "default": 256,
+          "description": "Maximum number of tokens to generate per completion."
+        },
+        "cliproxyInline.temperature": {
+          "type": "number",
+          "default": 0.1,
+          "description": "Sampling temperature for completions."
+        },
+        "cliproxyInline.debounceMs": {
+          "type": "number",
+          "default": 300,
+          "description": "Delay in milliseconds before a completion request is sent."
+        },
+        "cliproxyInline.requestTimeoutMs": {
+          "type": "number",
+          "default": 15000,
+          "description": "Timeout in milliseconds for a completion request."
+        },
+        "cliproxyInline.prefixLines": {
+          "type": "number",
+          "default": 120,
+          "description": "Number of lines before the cursor sent as context."
+        },
+        "cliproxyInline.suffixLines": {
+          "type": "number",
+          "default": 60,
+          "description": "Number of lines after the cursor sent as context."
+        },
+        "cliproxyInline.languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "*"
+          ],
+          "description": "Language ids where inline completions are offered. Use [\"*\"] for all languages."
+        },
+        "cliproxyInline.systemPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Optional extra instructions appended to the built-in system prompt."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish",
+    "publish:ovsx": "ovsx publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.0",
+    "ovsx": "^0.10.1",
+    "typescript": "^5.5.4"
+  }
+}

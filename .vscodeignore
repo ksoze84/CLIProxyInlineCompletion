@@ -8,3 +8,5 @@ package-lock.json
 **/*.map
 **/*.ts
 **/*.vsix
+tests/**
+.vscode-test/**

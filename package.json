@@ -1,8 +1,8 @@
 {
   "name": "cliproxy-inline-completion",
   "displayName": "CLIProxyApi Inline Completion",
-  "description": "AI inline completions (ghost text) powered by a local CLIProxyApi server.",
-  "version": "0.0.1",
+  "description": "AI inline completions and reviewable next edit suggestions powered by CLIProxyApi.",
+  "version": "0.0.2",
   "publisher": "ksoze84",
   "license": "MIT",
   "repository": {
@@ -44,11 +44,99 @@
       {
         "command": "cliproxyInline.selectModel",
         "title": "CLIProxy Inline: Select Model"
+      },
+      {
+        "command": "cliproxyInline.selectReasoningEffort",
+        "title": "CLIProxy Inline: Select Reasoning Effort"
+      },
+      {
+        "command": "cliproxyInline.triggerNextEdit",
+        "title": "CLIProxy Inline: Suggest Next Edit"
+      },
+      {
+        "command": "cliproxyInline.goToNextEdit",
+        "title": "CLIProxy Inline: Go To Next Edit",
+        "enablement": "cliproxyInline.nextEditAvailable",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "cliproxyInline.previewNextEdit",
+        "title": "CLIProxy Inline: Preview Next Edit",
+        "enablement": "cliproxyInline.nextEditAvailable",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "cliproxyInline.acceptNextEdit",
+        "title": "CLIProxy Inline: Accept Next Edit",
+        "enablement": "cliproxyInline.nextEditAvailable",
+        "icon": "$(check)"
+      },
+      {
+        "command": "cliproxyInline.rejectNextEdit",
+        "title": "CLIProxy Inline: Reject Next Edit",
+        "enablement": "cliproxyInline.nextEditAvailable",
+        "icon": "$(close)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "cliproxyInline.goToNextEdit",
+          "when": "cliproxyInline.nextEditAvailable",
+          "group": "navigation@80"
+        },
+        {
+          "command": "cliproxyInline.previewNextEdit",
+          "when": "cliproxyInline.nextEditAvailable",
+          "group": "navigation@81"
+        },
+        {
+          "command": "cliproxyInline.acceptNextEdit",
+          "when": "cliproxyInline.nextEditAvailable",
+          "group": "navigation@82"
+        },
+        {
+          "command": "cliproxyInline.rejectNextEdit",
+          "when": "cliproxyInline.nextEditAvailable",
+          "group": "navigation@83"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "cliproxyInline.goToNextEdit",
+        "key": "tab",
+        "when": "config.cliproxyInline.nextEdits.tabNavigation && cliproxyInline.nextEditAvailable && !cliproxyInline.nextEditNavigated && editorTextFocus && !editorReadonly && !isInDiffEditor && !editorHasSelection && !editorHasMultipleSelections && !editorTabMovesFocus && !inlineSuggestionVisible && !suggestWidgetVisible && !inSnippetMode && !renameInputVisible && !findWidgetVisible && !parameterHintsVisible"
+      },
+      {
+        "command": "cliproxyInline.acceptNextEdit",
+        "key": "tab",
+        "when": "config.cliproxyInline.nextEdits.tabNavigation && cliproxyInline.nextEditAvailable && cliproxyInline.nextEditNavigated && editorTextFocus && !editorReadonly && !isInDiffEditor && !editorHasSelection && !editorHasMultipleSelections && !editorTabMovesFocus && !inlineSuggestionVisible && !suggestWidgetVisible && !inSnippetMode && !renameInputVisible && !findWidgetVisible && !parameterHintsVisible"
+      },
+      {
+        "command": "cliproxyInline.rejectNextEdit",
+        "key": "escape",
+        "when": "cliproxyInline.nextEditAvailable && editorTextFocus && !suggestWidgetVisible && !inlineSuggestionVisible && !inSnippetMode && !renameInputVisible && !findWidgetVisible && !parameterHintsVisible"
       }
     ],
     "configuration": {
       "title": "CLIProxyApi Inline Completion",
       "properties": {
+        "cliproxyInline.nextEdits.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable reviewable next edit suggestions in the active file. Requires recent edits."
+        },
+        "cliproxyInline.nextEdits.automatic": {
+          "type": "boolean",
+          "default": false,
+          "description": "Request next edits after an editing pause. Inline completions take priority."
+        },
+        "cliproxyInline.nextEdits.tabNavigation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use Tab to navigate to a next edit and accept at its destination when no other suggestion or snippet is active."
+        },
         "cliproxyInline.enabled": {
           "type": "boolean",
           "default": true,
@@ -68,6 +156,25 @@
           "type": "string",
           "default": "gpt-4o-mini",
           "description": "Model id to request from CLIProxyApi."
+        },
+        "cliproxyInline.reasoningEffort": {
+          "type": "string",
+          "enum": [
+            "",
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "",
+          "enumDescriptions": [
+            "Omit the parameter and use the server/model default.",
+            "Minimal reasoning for the fastest, cheapest responses.",
+            "Low reasoning effort.",
+            "Balanced reasoning effort.",
+            "High reasoning effort for the most thorough responses."
+          ],
+          "markdownDescription": "Reasoning effort sent as `reasoning_effort` to models that support it. Empty omits the parameter. Ignored by providers that do not implement it."
         },
         "cliproxyInline.maxTokens": {
           "type": "number",
@@ -120,6 +227,8 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
+    "test:unit": "npm run compile && node --test tests/unit.test.cjs tests/editor.test.cjs",
+    "test:integration": "npm run compile && node tests/run-integration.cjs",
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
     "publish": "vsce publish",
@@ -128,6 +237,7 @@
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.2.0",
     "ovsx": "^0.10.1",
     "typescript": "^5.5.4"

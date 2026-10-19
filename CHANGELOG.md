@@ -1,6 +1,6 @@
 # Change Log
 
-## Unreleased
+## 0.1.3 - 2026-10-18
 
 - Accepting a next edit immediately requests the next one, so a rename or signature change can be propagated with repeated accepts.
 - Fix `Tab` accepting a stale inline completion instead of a next edit: when a next edit appears, visible ghost text is hidden, the in-flight completion is cancelled and no completion is offered while the next edit is shown.

@@ -2,7 +2,7 @@
   "name": "cliproxy-inline-completion",
   "displayName": "CLIProxyApi Inline Completion",
   "description": "AI inline completions and reviewable next edit suggestions powered by CLIProxyApi.",
-  "version": "0.0.2",
+  "version": "0.1.3",
   "publisher": "ksoze84",
   "license": "MIT",
   "repository": {

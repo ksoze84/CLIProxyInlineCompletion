@@ -11,7 +11,7 @@ VS Code 1.90 or newer and a running CLIProxyApi server. By default the extension
 ```bash
 npm install
 npm run package
-code --install-extension cliproxy-inline-completion-0.0.1.vsix
+code --install-extension cliproxy-inline-completion-0.1.3.vsix
 ```
 
 ## Usage

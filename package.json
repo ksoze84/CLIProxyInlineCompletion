@@ -42,12 +42,24 @@
         "title": "CLIProxy Inline: Trigger Inline Completion"
       },
       {
+        "command": "cliproxyInline.setBaseUrl",
+        "title": "CLIProxy Inline: Set CLIProxyApi URL"
+      },
+      {
         "command": "cliproxyInline.selectModel",
-        "title": "CLIProxy Inline: Select Model"
+        "title": "CLIProxy Inline: Select Inline Completion Model"
       },
       {
         "command": "cliproxyInline.selectReasoningEffort",
-        "title": "CLIProxy Inline: Select Reasoning Effort"
+        "title": "CLIProxy Inline: Select Inline Completion Reasoning Effort"
+      },
+      {
+        "command": "cliproxyInline.selectNextEditModel",
+        "title": "CLIProxy Inline: Select Next Edits Model"
+      },
+      {
+        "command": "cliproxyInline.selectNextEditReasoningEffort",
+        "title": "CLIProxy Inline: Select Next Edits Reasoning Effort"
       },
       {
         "command": "cliproxyInline.triggerNextEdit",
@@ -136,6 +148,30 @@
           "type": "boolean",
           "default": false,
           "description": "Use Tab to navigate to a next edit and accept at its destination when no other suggestion or snippet is active."
+        },
+        "cliproxyInline.nextEdits.model": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Model id for Next Edits. Empty uses `#cliproxyInline.model#`. Choose a model with reliable JSON output."
+        },
+        "cliproxyInline.nextEdits.reasoningEffort": {
+          "type": "string",
+          "enum": [
+            "",
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "",
+          "enumDescriptions": [
+            "Use cliproxyInline.reasoningEffort.",
+            "Minimal reasoning for the fastest, cheapest responses.",
+            "Low reasoning effort.",
+            "Balanced reasoning effort.",
+            "High reasoning effort for the most thorough responses."
+          ],
+          "markdownDescription": "Reasoning effort for Next Edits. Empty uses `#cliproxyInline.reasoningEffort#`."
         },
         "cliproxyInline.enabled": {
           "type": "boolean",
@@ -229,6 +265,7 @@
     "compile": "tsc -p ./",
     "test:unit": "npm run compile && node --test tests/unit.test.cjs tests/editor.test.cjs",
     "test:integration": "npm run compile && node tests/run-integration.cjs",
+    "test:live": "npm run compile && node --test tests/live.test.cjs",
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
     "publish": "vsce publish",

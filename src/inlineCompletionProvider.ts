@@ -47,12 +47,13 @@ export class CliProxyInlineCompletionProvider implements vscode.InlineCompletion
 
 	constructor(
 		private readonly output: vscode.LogOutputChannel,
-		private readonly requests = new RequestCoordinator()
+		private readonly requests = new RequestCoordinator(),
+		private readonly suppressed: (document: vscode.TextDocument) => boolean = () => false
 	) {}
 
 	reset(): void {
 		this.cache = undefined;
-		this.requests.cancel();
+		this.requests.cancel('completion');
 	}
 
 	async provideInlineCompletionItems(
@@ -62,7 +63,7 @@ export class CliProxyInlineCompletionProvider implements vscode.InlineCompletion
 		token: vscode.CancellationToken
 	): Promise<vscode.InlineCompletionItem[] | undefined> {
 		const config = getConfig();
-		if (!canSuggest(document) || token.isCancellationRequested) {
+		if (!canSuggest(document) || token.isCancellationRequested || this.suppressed(document)) {
 			return undefined;
 		}
 		const selected = context.selectedCompletionInfo;
@@ -74,9 +75,6 @@ export class CliProxyInlineCompletionProvider implements vscode.InlineCompletion
 			return undefined;
 		}
 		const pending = this.requests.start('completion');
-		if (!pending) {
-			return undefined;
-		}
 		const version = document.version;
 		const settings = JSON.stringify(config);
 		const cursor = vscode.window.activeTextEditor!.selection.active;
@@ -131,6 +129,7 @@ export class CliProxyInlineCompletionProvider implements vscode.InlineCompletion
 	private matchesRequest(document: vscode.TextDocument, version: number, settings: string,
 		cursor: vscode.Position, token: vscode.CancellationToken): boolean {
 		return !token.isCancellationRequested && document.version === version && canSuggest(document)
+			&& !this.suppressed(document)
 			&& vscode.window.activeTextEditor!.selection.active.isEqual(cursor)
 			&& JSON.stringify(getConfig()) === settings;
 	}

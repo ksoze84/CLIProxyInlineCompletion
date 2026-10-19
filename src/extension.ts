@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { listModels, safeErrorMessage } from './cliProxyClient';
+import { checkBaseUrl, listModels, safeErrorMessage } from './cliProxyClient';
 import { CONFIG_SECTION, REASONING_EFFORT_LEVELS, documentSelector, getConfig } from './config';
 import { CliProxyInlineCompletionProvider } from './inlineCompletionProvider';
 import { NextEditController } from './nextEditController';
@@ -25,29 +25,76 @@ function createStatusBarItem(): vscode.StatusBarItem {
 function updateStatusBar(item: vscode.StatusBarItem): void {
 	const config = getConfig();
 	item.text = config.enabled ? '$(sparkle) CLIProxy' : '$(circle-slash) CLIProxy';
-	const effort = config.reasoningEffort ? ` · ${config.reasoningEffort} effort` : '';
-	item.tooltip = `CLIProxyApi inline completions ${config.enabled ? 'enabled' : 'disabled'} — ${config.model}${effort} @ ${config.baseUrl}`;
+	const effort = (value: string) => value ? ` · ${value} effort` : '';
+	const nextEdits = config.nextEditsEnabled
+		? `\nNext Edits: ${config.nextEditsModel || config.model}${effort(config.nextEditsReasoningEffort || config.reasoningEffort)}`
+		: '';
+	item.tooltip = `CLIProxyApi inline completions ${config.enabled ? 'enabled' : 'disabled'} — ${config.model}${effort(config.reasoningEffort)} @ ${config.baseUrl}${nextEdits}`;
 }
 
 interface EffortPickItem extends vscode.QuickPickItem {
 	effort: string;
 }
 
-function effortItems(current: string): EffortPickItem[] {
+function effortItems(current: string, emptyLabel: string, emptyDescription: string): EffortPickItem[] {
 	const values: string[] = ['', ...REASONING_EFFORT_LEVELS];
 	return values.map(effort => ({
 		effort,
-		label: effort ? effort[0].toUpperCase() + effort.slice(1) : 'Server default',
-		description: effort ? `reasoning_effort: ${effort}` : 'omit reasoning_effort',
+		label: effort ? effort[0].toUpperCase() + effort.slice(1) : emptyLabel,
+		description: effort ? `reasoning_effort: ${effort}` : emptyDescription,
 		picked: effort === current
 	}));
+}
+
+// Write where the value is already set so a workspace value does not silently override it.
+async function updateSetting(key: string, value: unknown): Promise<void> {
+	const settings = vscode.workspace.getConfiguration(CONFIG_SECTION);
+	const inspected = settings.inspect(key);
+	let target = vscode.ConfigurationTarget.Global;
+	if (inspected?.workspaceFolderValue !== undefined) {
+		target = vscode.ConfigurationTarget.WorkspaceFolder;
+	} else if (inspected?.workspaceValue !== undefined) {
+		target = vscode.ConfigurationTarget.Workspace;
+	}
+	await settings.update(key, value, target);
+}
+
+interface ModelPickItem extends vscode.QuickPickItem {
+	model: string;
+}
+
+async function pickModel(output: vscode.LogOutputChannel, title: string, current: string,
+	inherit?: string): Promise<string | undefined> {
+	const config = getConfig();
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+	try {
+		const models = await listModels(config, controller.signal);
+		if (models.length === 0) {
+			vscode.window.showWarningMessage('CLIProxyApi returned no models.');
+			return undefined;
+		}
+		const items: ModelPickItem[] = models.map(model => ({ model, label: model, picked: model === current }));
+		if (inherit !== undefined) {
+			items.unshift({ model: '', label: 'Same as inline completions', description: inherit, picked: current === '' });
+		}
+		const picked = await vscode.window.showQuickPick(items, { title, placeHolder: current || inherit });
+		return picked?.model;
+	} catch (error) {
+		const message = safeErrorMessage(error);
+		output.error(message);
+		vscode.window.showErrorMessage(message);
+		return undefined;
+	} finally {
+		clearTimeout(timeout);
+	}
 }
 
 export function activate(context: vscode.ExtensionContext): void {
 	const output = vscode.window.createOutputChannel('CLIProxy Inline Completion', { log: true });
 	const requests = new RequestCoordinator();
-	const provider = new CliProxyInlineCompletionProvider(output, requests);
 	const nextEdits = new NextEditController(output, requests);
+	const provider = new CliProxyInlineCompletionProvider(output, requests, document => nextEdits.hasCandidate(document));
 	const statusBarItem = createStatusBarItem();
 
 	registerProvider(provider);
@@ -83,50 +130,70 @@ export function activate(context: vscode.ExtensionContext): void {
 			vscode.commands.executeCommand('editor.action.inlineSuggest.trigger')
 		),
 		vscode.commands.registerCommand('cliproxyInline.selectModel', async () => {
-			const config = getConfig();
-			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
-			try {
-				const models = await listModels(config, controller.signal);
-				if (models.length === 0) {
-					vscode.window.showWarningMessage('CLIProxyApi returned no models.');
-					return;
-				}
-				const picked = await vscode.window.showQuickPick(models, {
-					title: 'CLIProxyApi model',
-					placeHolder: config.model
-				});
-				if (picked) {
-					await vscode.workspace
-						.getConfiguration(CONFIG_SECTION)
-						.update('model', picked, vscode.ConfigurationTarget.Global);
-					updateStatusBar(statusBarItem);
-				}
-			} catch (error) {
-				const message = safeErrorMessage(error);
-				output.error(message);
-				vscode.window.showErrorMessage(message);
-			} finally {
-				clearTimeout(timeout);
+			const model = await pickModel(output, 'Inline completion model', getConfig().model);
+			if (model) {
+				await updateSetting('model', model);
+				updateStatusBar(statusBarItem);
 			}
 		}),
 		vscode.commands.registerCommand('cliproxyInline.selectReasoningEffort', async () => {
 			const config = getConfig();
-			const picked = await vscode.window.showQuickPick(effortItems(config.reasoningEffort), {
-				title: 'Reasoning effort',
-				placeHolder: config.reasoningEffort || 'Server default'
-			});
+			const picked = await vscode.window.showQuickPick(
+				effortItems(config.reasoningEffort, 'Server default', 'omit reasoning_effort'), {
+					title: 'Inline completion reasoning effort',
+					placeHolder: config.reasoningEffort || 'Server default'
+				});
 			if (!picked) {
 				return;
 			}
-			await vscode.workspace
-				.getConfiguration(CONFIG_SECTION)
-				.update('reasoningEffort', picked.effort, vscode.ConfigurationTarget.Global);
+			await updateSetting('reasoningEffort', picked.effort);
 			updateStatusBar(statusBarItem);
 			vscode.window.setStatusBarMessage(
 				`CLIProxy reasoning effort: ${picked.effort || 'server default'}`,
 				2000
 			);
+		}),
+		vscode.commands.registerCommand('cliproxyInline.selectNextEditModel', async () => {
+			const config = getConfig();
+			const model = await pickModel(output, 'Next Edits model', config.nextEditsModel, config.model);
+			if (model !== undefined) {
+				await updateSetting('nextEdits.model', model);
+				updateStatusBar(statusBarItem);
+			}
+		}),
+		vscode.commands.registerCommand('cliproxyInline.selectNextEditReasoningEffort', async () => {
+			const config = getConfig();
+			const inherited = config.reasoningEffort || 'server default';
+			const picked = await vscode.window.showQuickPick(
+				effortItems(config.nextEditsReasoningEffort, 'Same as inline completions', inherited), {
+					title: 'Next Edits reasoning effort',
+					placeHolder: config.nextEditsReasoningEffort || inherited
+				});
+			if (!picked) {
+				return;
+			}
+			await updateSetting('nextEdits.reasoningEffort', picked.effort);
+			updateStatusBar(statusBarItem);
+			vscode.window.setStatusBarMessage(`Next Edits reasoning effort: ${picked.effort || inherited}`, 2000);
+		}),
+		vscode.commands.registerCommand('cliproxyInline.setBaseUrl', async () => {
+			const value = await vscode.window.showInputBox({
+				title: 'CLIProxyApi URL',
+				prompt: 'Server root used for completions, Next Edits and the model list',
+				value: getConfig().baseUrl,
+				placeHolder: 'http://127.0.0.1:8317',
+				ignoreFocusOut: true,
+				validateInput: input => {
+					const { error, warning } = checkBaseUrl(input);
+					return error ?? (warning ? { message: warning, severity: vscode.InputBoxValidationSeverity.Warning } : undefined);
+				}
+			});
+			if (value === undefined || checkBaseUrl(value).error) {
+				return;
+			}
+			await updateSetting('baseUrl', value.trim());
+			updateStatusBar(statusBarItem);
+			vscode.window.setStatusBarMessage(`CLIProxyApi URL: ${getConfig().baseUrl}`, 2000);
 		})
 	);
 }

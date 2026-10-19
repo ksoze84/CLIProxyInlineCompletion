@@ -1,186 +1,27 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const Module = require('node:module');
 const { startServer, reply } = require('./helpers.cjs');
-
-function emitter() {
-  const listeners = new Set();
-  return {
-    event: listener => { listeners.add(listener); return { dispose: () => listeners.delete(listener) }; },
-    fire: value => { for (const listener of listeners) listener(value); }
-  };
-}
-
-class Position {
-  constructor(line, character) { this.line = line; this.character = character; }
-  isEqual(other) { return this.line === other.line && this.character === other.character; }
-}
-
-class Range {
-  constructor(start, end) { this.start = start; this.end = end; }
-  get isSingleLine() { return this.start.line === this.end.line; }
-  get isEmpty() { return this.start.isEqual(this.end); }
-  contains(position) {
-    return this.isSingleLine && position.line === this.start.line
-      && position.character >= this.start.character && position.character <= this.end.character;
-  }
-}
-
-class Selection extends Range {
-  constructor(start, end) { super(start, end); this.active = end; }
-}
-
-class Uri {
-  constructor(scheme, path) { this.scheme = scheme; this.path = path; }
-  toString() { return `${this.scheme}:${this.path}`; }
-  static from(value) { return new Uri(value.scheme, value.path); }
-}
-
-function environment() {
-  const changed = emitter();
-  const active = emitter();
-  const selectionChanged = emitter();
-  const closed = emitter();
-  const configured = emitter();
-  const commands = new Map();
-  const contexts = new Map();
-  const contextChanged = emitter();
-  const providers = new Map();
-  const settings = new Map([['enabled', true], ['nextEdits.enabled', true], ['nextEdits.automatic', false], ['debounceMs', 0]]);
-  const errors = [];
-  const disposable = () => ({ dispose() {} });
-  const api = {
-    Position, Range, Selection, Uri,
-    InlineCompletionItem: class { constructor(insertText, range) { this.insertText = insertText; this.range = range; } },
-    InlineCompletionTriggerKind: { Automatic: 1, Invoke: 0 },
-    EndOfLine: { LF: 1, CRLF: 2 },
-    StatusBarAlignment: { Right: 2 },
-    DecorationRangeBehavior: { ClosedClosed: 1 },
-    TextEditorRevealType: { InCenterIfOutsideViewport: 1 },
-    ThemeColor: class { constructor(id) { this.id = id; } },
-    MarkdownString: class { appendCodeblock() { return this; } },
-    workspace: {
-      isTrusted: true,
-      fs: { isWritableFileSystem: () => true },
-      asRelativePath: uri => uri.path,
-      getConfiguration: () => ({ get: (key, fallback) => settings.has(key) ? settings.get(key) : fallback }),
-      onDidChangeTextDocument: changed.event,
-      onDidCloseTextDocument: closed.event,
-      onDidChangeConfiguration: configured.event,
-      registerTextDocumentContentProvider: (scheme, provider) => {
-        providers.set(scheme, provider);
-        return { dispose: () => providers.delete(scheme) };
-      }
-    },
-    window: {
-      activeTextEditor: undefined,
-      visibleTextEditors: [],
-      onDidChangeActiveTextEditor: active.event,
-      onDidChangeTextEditorSelection: selectionChanged.event,
-      createTextEditorDecorationType: disposable,
-      createStatusBarItem: () => ({ ...disposable(), show() {}, hide() {} }),
-      setStatusBarMessage: disposable,
-      showInformationMessage: async () => undefined,
-      showTextDocument: async document => show(document)
-    },
-    commands: {
-      registerCommand: (id, callback) => { commands.set(id, callback); return { dispose: () => commands.delete(id) }; },
-      executeCommand: async (id, ...args) => {
-        if (id === 'setContext') {
-          contexts.set(args[0], args[1]);
-          contextChanged.fire(args);
-        }
-        else if (id === 'vscode.diff') {
-          api.diff = args;
-          await show(makeDocument(providers.get(args[1].scheme).provideTextDocumentContent(args[1]), args[1]));
-        } else return commands.get(id)?.(...args);
-      }
-    }
-  };
-  function makeDocument(text, uri = new Uri('untitled', '/test.ts')) {
-    return {
-      uri, text, version: 1, languageId: 'typescript', eol: 1, isClosed: false,
-      get isUntitled() { return uri.scheme === 'untitled'; },
-      get lineCount() { return this.text.split('\n').length; },
-      offsetAt(position) {
-        const lines = this.text.split('\n');
-        return lines.slice(0, position.line).reduce((total, line) => total + line.length + 1, 0) + position.character;
-      },
-      positionAt(offset) {
-        const lines = this.text.slice(0, offset).split('\n');
-        return new Position(lines.length - 1, lines.at(-1).length);
-      },
-      getText(range) { return range ? this.text.slice(this.offsetAt(range.start), this.offsetAt(range.end)) : this.text; },
-      lineAt(line) {
-        const value = this.text.split('\n')[line];
-        return { text: value, range: new Range(new Position(line, 0), new Position(line, value.length)) };
-      }
-    };
-  }
-  const editors = new Map();
-  async function show(document) {
-    let editor = editors.get(document);
-    if (!editor) {
-      let selection = new Selection(new Position(0, 0), new Position(0, 0));
-      editor = {
-        document, decorations: [], selections: [selection],
-        get selection() { return selection; },
-        set selection(value) {
-          selection = value;
-          this.selections = [value];
-          selectionChanged.fire({ textEditor: this });
-        },
-        revealRange(range) { this.revealed = range; },
-        setDecorations(_type, values) { this.decorations = values; },
-        edit: async (callback, options) => {
-          editor.undoOptions = options;
-          callback({ replace: (range, newText) => edit(document, document.offsetAt(range.start), document.offsetAt(range.end) - document.offsetAt(range.start), newText) });
-          return true;
-        }
-      };
-      editors.set(document, editor);
-    }
-    api.window.activeTextEditor = editor;
-    api.window.visibleTextEditors = [...editors.values()];
-    active.fire(editor);
-    return editor;
-  }
-  function edit(document, offset, length, text, reason) {
-    document.text = document.text.slice(0, offset) + text + document.text.slice(offset + length);
-    document.version += 1;
-    changed.fire({ document, reason, contentChanges: [{ rangeOffset: offset, rangeLength: length, text }] });
-  }
-  const available = () => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { subscription.dispose(); reject(new Error('Candidate timed out')); }, 5000);
-    const subscription = contextChanged.event(([key, value]) => {
-      if (key === 'cliproxyInline.nextEditAvailable' && value) {
-        clearTimeout(timer);
-        subscription.dispose();
-        resolve();
-      }
-    });
-  });
-  return { api, settings, contexts, providers, makeDocument, show, edit, configured, available,
-    output: { error: message => errors.push(message), warn: message => errors.push(message) }, errors };
-}
+const { emitter, Position, Range, Selection, environment, loadExtension } = require('./vscodeStub.cjs');
 
 test('editor adapter: completion ranges, config invalidation, cancellation and NES review lifecycle', async () => {
   const env = environment();
-  const load = Module._load;
-  Module._load = function(id, ...args) { return id === 'vscode' ? env.api : load.call(this, id, ...args); };
-  let CliProxyInlineCompletionProvider, NextEditController;
-  try {
-    ({ CliProxyInlineCompletionProvider } = require('../out/inlineCompletionProvider'));
-    ({ NextEditController } = require('../out/nextEditController'));
-  } finally { Module._load = load; }
-  const { RequestCoordinator } = require('../out/requestCoordinator');
+  const { CliProxyInlineCompletionProvider, NextEditController, RequestCoordinator } = loadExtension(env);
   const requests = new RequestCoordinator();
-  const provider = new CliProxyInlineCompletionProvider(env.output, requests);
+  let controller;
+  const provider = new CliProxyInlineCompletionProvider(env.output, requests, doc => controller.hasCandidate(doc));
   let content = 'suffix';
   let held;
   let started;
-  const server = await startServer(async (_entry, response) => {
+  let completionHeld;
+  let completionStarted;
+  const server = await startServer(async (entry, response) => {
     const result = content;
+    const nes = entry.body.messages[0].content.includes('Predict the next');
+    if (!nes && completionHeld) {
+      completionStarted?.();
+      await completionHeld;
+      return reply(response, 'done');
+    }
     started?.();
     if (held) await held;
     reply(response, result);
@@ -193,8 +34,16 @@ test('editor adapter: completion ranges, config invalidation, cancellation and N
   const invoke = { triggerKind: 0, selectedCompletionInfo: undefined };
   const position = new Position(0, 8);
   editor.selection = new Selection(position, position);
-  const controller = new NextEditController(env.output, requests);
+  controller = new NextEditController(env.output, requests);
   const command = name => env.api.commands.executeCommand(`cliproxyInline.${name}`);
+  // A cancelled completion request can still reach the server late, so count predictions separately.
+  const predictions = () => server.requests.filter(entry => entry.body.messages[0].content.includes('Predict the next')).length;
+  const settled = async mode => {
+    const count = () => env.logs.filter(line => line.startsWith(`Next edit ${mode}:`)).length;
+    const before = count();
+    for (const start = Date.now(); Date.now() - start < 5000 && count() === before;) await new Promise(resolve => setTimeout(resolve, 10));
+    return env.logs.filter(line => line.startsWith(`Next edit ${mode}:`)).at(-1);
+  };
   try {
     const first = await provider.provideInlineCompletionItems(document, position, invoke, token);
     const cached = await provider.provideInlineCompletionItems(document, position, invoke, token);
@@ -238,10 +87,20 @@ test('editor adapter: completion ranges, config invalidation, cancellation and N
     env.edit(source, 9, 4, 'displayName');
     const before = source.text;
     content = JSON.stringify({ edit: { oldText: 'const value = name();', newText: 'const value = displayName();' } });
+    env.api.executed.length = 0;
     await command('triggerNextEdit');
     assert.equal(source.text, before);
     assert.equal(env.contexts.get('cliproxyInline.nextEditAvailable'), true);
     assert.equal(env.contexts.get('cliproxyInline.nextEditNavigated'), false);
+    assert.match(env.logs.at(-1), /^Next edit manual: ok \(\d+ ms, model \d+ ms\)$/);
+    assert.ok(env.logs.every(line => !line.includes('displayName')), 'logs never contain document text');
+    const nesBody = server.requests.at(-1).body;
+    assert.equal('max_tokens' in nesBody, false, 'NES sets no output limit');
+    assert.equal(JSON.parse(nesBody.messages[1].content).document, before, 'NES sends the whole document');
+    assert.ok(env.api.executed.includes('editor.action.inlineSuggest.hide'), 'ghost text is hidden so Tab reaches the next edit');
+    const shownSize = server.requests.length;
+    assert.equal(await provider.provideInlineCompletionItems(source, new Position(0, 0), invoke, token), undefined);
+    assert.equal(server.requests.length, shownSize, 'no completion is requested while a next edit is shown');
     await command('goToNextEdit');
     assert.equal(editor.selection.active.line, 1);
     assert.equal(env.contexts.get('cliproxyInline.nextEditNavigated'), true);
@@ -251,9 +110,11 @@ test('editor adapter: completion ranges, config invalidation, cancellation and N
     assert.equal(preview.provideTextDocumentContent(left), before);
     assert.equal(preview.provideTextDocumentContent(right), before.replace('const value = name();', 'const value = displayName();'));
     assert.equal(source.text, before);
+    const chainedFirst = settled('chained');
     await command('acceptNextEdit');
     assert.ok(source.text.includes('const value = displayName();'));
     assert.deepEqual(editor.undoOptions, { undoStopBefore: true, undoStopAfter: true });
+    assert.match(await chainedFirst, /: anchor-missing \(/, 'the chained request saw the accepted document');
     assert.equal(env.contexts.get('cliproxyInline.nextEditAvailable'), false);
     env.edit(source, 0, source.text.length, before);
     await command('triggerNextEdit');
@@ -265,23 +126,72 @@ test('editor adapter: completion ranges, config invalidation, cancellation and N
     await command('rejectNextEdit');
     await command('triggerNextEdit');
     assert.equal(env.contexts.get('cliproxyInline.nextEditAvailable'), false);
+    assert.match(env.logs.at(-1), /: repeated \(/);
     await command('acceptNextEdit');
     assert.equal(source.text, userVersion);
+
+    env.edit(source, 0, 0, '// moved\n');
+    held = new Promise(resolve => { release = resolve; });
+    const movedStarted = new Promise(resolve => { started = resolve; });
+    const moved = command('triggerNextEdit');
+    await movedStarted;
+    editor.selection = new Selection(new Position(1, 3), new Position(1, 3));
+    const completion = provider.provideInlineCompletionItems(source, new Position(1, 3), invoke, token);
+    release();
+    held = undefined;
+    started = undefined;
+    await moved;
+    assert.equal(await completion, undefined, 'a completion racing a shown next edit is discarded');
+    assert.equal(env.contexts.get('cliproxyInline.nextEditAvailable'), true, 'cursor moves and completions keep an in-flight NES');
+    await command('rejectNextEdit');
     env.settings.set('nextEdits.automatic', true);
     env.configured.fire({ affectsConfiguration: () => true });
     const automatic = env.available();
-    const size = server.requests.length;
+    const size = predictions();
     env.edit(source, 0, 0, '// first\n');
     editor.selection = new Selection(new Position(0, 0), new Position(0, 0));
     env.edit(source, 0, 0, '// second\n');
     editor.selection = new Selection(new Position(0, 0), new Position(0, 0));
-    assert.equal(server.requests.length, size);
+    assert.equal(predictions(), size);
     await automatic;
-    assert.equal(server.requests.length, size + 1);
+    assert.equal(predictions(), size + 1);
+    assert.match(env.logs.at(-1), /^Next edit automatic: ok /);
+    const firstReply = content;
+    content = JSON.stringify({ edit: { oldText: '// second', newText: '// 2nd' } });
+    const acceptedSize = predictions();
     await command('acceptNextEdit');
-    const acceptedSize = server.requests.length;
+    // Registered after accepting: showing the source editor re-announces the old candidate.
+    const chained = env.available();
+    assert.ok(source.text.includes('const value = displayName();'));
+    await chained;
+    assert.equal(predictions(), acceptedSize + 1, 'accepting requests the next prediction immediately');
+    assert.match(env.logs.at(-1), /^Next edit chained: ok /);
+    assert.ok(source.text.includes('// second'), 'the chained edit is only proposed, not applied');
+    await command('rejectNextEdit');
     await new Promise(resolve => setTimeout(resolve, 900));
-    assert.equal(server.requests.length, acceptedSize);
+    assert.equal(predictions(), acceptedSize + 1, 'the accepted edit does not also schedule an automatic request');
+    content = firstReply;
+
+    const nesReply = content;
+    content = JSON.stringify({ edit: { oldText: '// busy', newText: '// idle' } });
+    let releaseCompletion;
+    completionHeld = new Promise(resolve => { releaseCompletion = resolve; });
+    const completionRunning = new Promise(resolve => { completionStarted = resolve; });
+    env.edit(source, 0, 0, '// busy\n');
+    editor.selection = new Selection(new Position(0, 8), new Position(0, 8));
+    const busyCompletion = provider.provideInlineCompletionItems(source, new Position(0, 8), invoke, token);
+    await completionRunning;
+    const busySize = server.requests.length;
+    await new Promise(resolve => setTimeout(resolve, 900));
+    assert.equal(server.requests.length, busySize, 'automatic NES waits while a completion is in flight');
+    const afterCompletion = env.available();
+    completionHeld = undefined;
+    releaseCompletion();
+    await busyCompletion;
+    await afterCompletion;
+    assert.equal(server.requests.length, busySize + 1, 'automatic NES runs once the completion finishes');
+    await command('rejectNextEdit');
+    content = nesReply;
     env.settings.set('nextEdits.automatic', false);
     env.configured.fire({ affectsConfiguration: () => true });
     env.edit(source, 0, source.text.length, before);

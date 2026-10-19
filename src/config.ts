@@ -28,6 +28,8 @@ export interface ExtensionConfig {
 	nextEditsEnabled: boolean;
 	nextEditsAutomatic: boolean;
 	nextEditsTabNavigation: boolean;
+	nextEditsModel: string;
+	nextEditsReasoningEffort: ReasoningEffort;
 }
 
 function bounded(value: number, fallback: number, minimum: number, maximum: number): number {
@@ -66,7 +68,9 @@ export function getConfig(): ExtensionConfig {
 		systemPrompt: cfg.get<string>('systemPrompt', '').slice(0, 2000),
 		nextEditsEnabled: cfg.get<boolean>('nextEdits.enabled', false),
 		nextEditsAutomatic: cfg.get<boolean>('nextEdits.automatic', false),
-		nextEditsTabNavigation: cfg.get<boolean>('nextEdits.tabNavigation', false)
+		nextEditsTabNavigation: cfg.get<boolean>('nextEdits.tabNavigation', false),
+		nextEditsModel: cfg.get<string>('nextEdits.model', '').trim(),
+		nextEditsReasoningEffort: parseReasoningEffort(cfg.get<unknown>('nextEdits.reasoningEffort', ''))
 	};
 }
 

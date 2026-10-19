@@ -26,7 +26,9 @@ exports.run = async () => {
     console.log(`PASS ${name}`);
   };
   const command = name => vscode.commands.executeCommand(`cliproxyInline.${name}`);
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const move = async (editor, position) => {
+    if (editor.selection.isEmpty && editor.selection.active.isEqual(position)) return;
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => { subscription.dispose(); reject(new Error('Cursor event timed out')); }, 5000);
       const subscription = vscode.window.onDidChangeTextEditorSelection(event => {
@@ -135,6 +137,46 @@ exports.run = async () => {
       await command('triggerNextEdit');
       await command('acceptNextEdit');
       assert.equal(nesDocument.getText(), current);
+    });
+    // Tab resolves to the next edit only when `inlineSuggestionVisible` is false; real key presses can't be sent from tests.
+    await check('a next edit hides visible ghost text and keeps it hidden', async () => {
+      await set('debounceMs', 0);
+      const tabDocument = await vscode.workspace.openTextDocument({
+        language: 'typescript',
+        content: 'function name() { return 1; }\n\nconst result = name();\n'
+      });
+      editor = await vscode.window.showTextDocument(tabDocument);
+      await editor.edit(builder => builder.replace(new vscode.Range(0, 9, 0, 13), 'label'));
+      const cursor = new vscode.Position(0, 14);
+      const showGhost = async () => {
+        await move(editor, cursor);
+        const size = server.requests.length;
+        nextReply = 'GHOST';
+        await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+        for (const start = Date.now(); Date.now() - start < 5000 && server.requests.length === size;) await sleep(50);
+        await sleep(300);
+      };
+      await showGhost();
+      await vscode.commands.executeCommand('editor.action.inlineSuggest.commit');
+      assert.ok(tabDocument.getText().includes('GHOST'), 'control: the harness shows acceptable ghost text');
+      await vscode.commands.executeCommand('undo');
+      await showGhost();
+      nextReply = JSON.stringify({ edit: { oldText: 'const result = name();', newText: 'const result = label();' } });
+      await command('triggerNextEdit');
+      await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+      await sleep(300);
+      await vscode.commands.executeCommand('editor.action.inlineSuggest.commit');
+      assert.equal(tabDocument.getText().includes('GHOST'), false, 'ghost text is hidden and not offered again');
+      await command('goToNextEdit');
+      assert.equal(editor.selection.active.line, 2);
+      nextReply = '{"edit":null}';
+      const predictions = () => server.requests.filter(entry => entry.body.messages[0].content.includes('Predict the next')).length;
+      const before = predictions();
+      await command('acceptNextEdit');
+      assert.ok(tabDocument.getText().includes('const result = label();'));
+      for (const start = Date.now(); Date.now() - start < 5000 && predictions() === before;) await sleep(50);
+      assert.equal(predictions(), before + 1, 'accepting a next edit requests the next one');
+      await set('debounceMs', 5000);
     });
     await check('multiple cursors are excluded from requests', async () => {
       editor.selections = [new vscode.Selection(0, 0, 0, 0), new vscode.Selection(1, 0, 1, 0)];

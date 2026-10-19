@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
 import { fetchNextEdit, safeErrorMessage } from './cliProxyClient';
 import { CONFIG_SECTION, canSuggest, getConfig } from './config';
-import { EditHistory, PredictedEdit, buildNextEditRequest, parseNextEdit } from './nextEdit';
-import { RequestCoordinator } from './requestCoordinator';
+import { EditHistory, NextEditRequest, PredictedEdit, buildNextEditRequest, parseNextEdit } from './nextEdit';
+import { PendingRequest, RequestCoordinator } from './requestCoordinator';
 
 const PREVIEW_SCHEME = 'cliproxy-next-edit';
+
+type TriggerMode = 'manual' | 'automatic' | 'chained';
 
 interface Candidate extends PredictedEdit {
 	id: number;
@@ -32,7 +34,7 @@ export class NextEditController implements vscode.Disposable {
 	private sequence = 0;
 	private rejected: string | undefined;
 	private applying = false;
-	private pending: { cancel(): void } | undefined;
+	private pending: PendingRequest | undefined;
 	private navigatedId: number | undefined;
 	private disposed = false;
 
@@ -58,8 +60,8 @@ export class NextEditController implements vscode.Disposable {
 				if (this.timer) {
 					this.schedule();
 				}
-				this.pending?.cancel();
 				if (!canSuggest(event.textEditor.document, event.textEditor)) {
+					this.pending?.cancel();
 					this.clearCandidate();
 				}
 				this.updatePresentation();
@@ -77,7 +79,7 @@ export class NextEditController implements vscode.Disposable {
 					this.track(vscode.window.activeTextEditor);
 				}
 			}),
-			vscode.commands.registerCommand('cliproxyInline.triggerNextEdit', () => this.trigger(false)),
+			vscode.commands.registerCommand('cliproxyInline.triggerNextEdit', () => this.trigger('manual')),
 			vscode.commands.registerCommand('cliproxyInline.goToNextEdit', () => this.navigate()),
 			vscode.commands.registerCommand('cliproxyInline.previewNextEdit', () => this.preview()),
 			vscode.commands.registerCommand('cliproxyInline.acceptNextEdit', () => this.accept()),
@@ -108,7 +110,7 @@ export class NextEditController implements vscode.Disposable {
 			return;
 		}
 		this.stopTimer();
-		this.requests.cancel();
+		this.requests.cancel('nextEdit');
 		this.clearCandidate();
 		const after = event.document.getText();
 		if (after.length > 2000000) {
@@ -127,7 +129,7 @@ export class NextEditController implements vscode.Disposable {
 		this.stopTimer();
 		this.timer = setTimeout(() => {
 			this.timer = undefined;
-			void this.trigger(true);
+			void this.trigger('automatic');
 		}, 800);
 	}
 
@@ -136,51 +138,78 @@ export class NextEditController implements vscode.Disposable {
 		this.timer = undefined;
 	}
 
-	private async trigger(automatic: boolean): Promise<void> {
+	private async trigger(mode: TriggerMode): Promise<void> {
 		if (this.disposed) {
 			return;
 		}
 		this.stopTimer();
+		const automatic = mode !== 'manual';
+		const started = Date.now();
+		const log = (outcome: string, extra = '') => this.output.info(
+			`Next edit ${mode}: ${outcome} (${Date.now() - started} ms${extra})`);
 		const config = getConfig();
 		const editor = vscode.window.activeTextEditor;
 		if (!editor || !config.nextEditsEnabled || !canSuggest(editor.document, editor)) {
 			if (!automatic) {
+				log('ineligible');
 				void vscode.window.showInformationMessage('Next Edits requires an eligible editor and cliproxyInline.nextEdits.enabled.');
 			}
 			return;
 		}
 		this.track(editor);
-		const document = editor.document;
-		const position = editor.selection.active;
-		const request = buildNextEditRequest(document.languageId, vscode.workspace.asRelativePath(document.uri),
-			this.snapshot, document.offsetAt(position), this.history.get());
+		const request = buildNextEditRequest(editor.document.languageId, vscode.workspace.asRelativePath(editor.document.uri),
+			this.snapshot, editor.document.offsetAt(editor.selection.active), this.history.get());
 		if (!request) {
+			log('no-history');
 			this.report('Next Edits: make a small edit first; no recent context available.', automatic);
 			return;
 		}
-		const pending = this.requests.start(automatic ? 'automaticNextEdit' : 'nextEdit');
-		if (!pending) {
-			return;
-		}
+		await this.predict(editor.document, request, automatic, log);
+	}
+
+	private async predict(document: vscode.TextDocument, request: NextEditRequest,
+		automatic: boolean, log: (outcome: string, extra?: string) => void): Promise<void> {
+		const config = getConfig();
+		const pending = this.requests.start('nextEdit');
 		this.clearCandidate();
 		this.pending = pending;
 		const version = document.version;
 		const settings = JSON.stringify(config);
-		const timeout = setTimeout(() => pending.cancel(), config.requestTimeoutMs);
+		let timeout: ReturnType<typeof setTimeout> | undefined;
 		try {
-			const raw = await fetchNextEdit(config, request, pending.signal);
-			if (!pending.isCurrent() || !this.matchesRequest(document, version, settings, position)) {
+			// Inline completions keep priority: an automatic prediction waits for the one in flight.
+			const ready = !automatic || await this.requests.completionIdle(pending.signal);
+			if (!ready || !pending.isCurrent() || !this.matchesRequest(document, version, settings)) {
+				log(ready ? 'stale' : 'cancelled');
 				return;
 			}
-			const edit = parseNextEdit(raw, request.window);
-			if (!edit || this.rejected === JSON.stringify([version, edit])) {
-				this.report('Next Edits: no valid related edit suggested.', automatic);
+			timeout = setTimeout(() => pending.cancel(), config.requestTimeoutMs);
+			const requested = Date.now();
+			const { content, truncated } = await fetchNextEdit(config, request, pending.signal);
+			const model = `, model ${Date.now() - requested} ms`;
+			if (!pending.isCurrent() || !this.matchesRequest(document, version, settings)) {
+				log('stale', model);
 				return;
 			}
+			const edit = this.validate(content, truncated, request.document, version);
+			if (typeof edit === 'string') {
+				log(edit, model);
+				this.report(edit === 'truncated'
+					? 'Next Edits: the model ran out of tokens; try a lower reasoning effort.'
+					: 'Next Edits: no valid related edit suggested.', automatic);
+				return;
+			}
+			log('ok', model);
 			this.candidate = { ...edit, id: ++this.sequence, document, version, settings };
 			this.updatePresentation();
+			// Visible ghost text owns Tab, so it would be accepted instead of the next edit.
+			this.requests.cancel('completion');
+			void vscode.commands.executeCommand('editor.action.inlineSuggest.hide');
 		} catch (error) {
-			if (!pending.signal.aborted) {
+			if (pending.signal.aborted) {
+				log('cancelled');
+			} else {
+				log('http-error');
 				this.output.warn(safeErrorMessage(error));
 				this.report(safeErrorMessage(error), automatic);
 			}
@@ -193,16 +222,28 @@ export class NextEditController implements vscode.Disposable {
 		}
 	}
 
+	/** Inline completions are suppressed while this is true. */
+	hasCandidate(document: vscode.TextDocument): boolean {
+		return this.candidate?.document === document && this.isValid();
+	}
+
+	private validate(content: string, truncated: boolean, text: string, version: number): PredictedEdit | string {
+		if (truncated) {
+			return 'truncated';
+		}
+		const edit = parseNextEdit(content, text);
+		return typeof edit !== 'string' && this.rejected === JSON.stringify([version, edit]) ? 'repeated' : edit;
+	}
+
 	private report(message: string, automatic: boolean): void {
 		if (!automatic) {
 			vscode.window.setStatusBarMessage(message, 3000);
 		}
 	}
 
-	private matchesRequest(document: vscode.TextDocument, version: number, settings: string, position: vscode.Position): boolean {
+	private matchesRequest(document: vscode.TextDocument, version: number, settings: string): boolean {
 		return !this.disposed && document === this.source && document.version === version
-			&& JSON.stringify(getConfig()) === settings && canSuggest(document)
-			&& vscode.window.activeTextEditor!.selection.active.isEqual(position);
+			&& JSON.stringify(getConfig()) === settings && canSuggest(document);
 	}
 
 	private isValid(candidate = this.candidate): candidate is Candidate {
@@ -298,8 +339,9 @@ export class NextEditController implements vscode.Disposable {
 			return;
 		}
 		this.applying = true;
+		let applied = false;
 		try {
-			const applied = await editor.edit(builder => builder.replace(this.range(candidate), candidate.newText), {
+			applied = await editor.edit(builder => builder.replace(this.range(candidate), candidate.newText), {
 				undoStopBefore: true,
 				undoStopAfter: true
 			});
@@ -309,6 +351,10 @@ export class NextEditController implements vscode.Disposable {
 		} finally {
 			this.applying = false;
 			this.clearCandidate();
+		}
+		if (applied) {
+			// The accepted edit is already in the history, so the model sees it as the latest change.
+			void this.trigger('chained');
 		}
 	}
 
@@ -331,7 +377,7 @@ export class NextEditController implements vscode.Disposable {
 
 	private reset(): void {
 		this.stopTimer();
-		this.requests.cancel();
+		this.requests.cancel('nextEdit');
 		this.history.clear();
 		this.source = undefined;
 		this.snapshot = '';
